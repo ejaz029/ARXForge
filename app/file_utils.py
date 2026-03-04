@@ -45,6 +45,24 @@
 import os
 import xml.etree.ElementTree as ET
 
+ARXML_EXTENSIONS = (".arxml", ".xml")
+
+
+def is_arxml_only(filename):
+    """Return True if filename ends with .arxml only (case-insensitive). Use for upload validation."""
+    if not filename:
+        return False
+    return filename.lower().endswith(".arxml")
+
+
+def is_arxml_or_xml(filename):
+    """Return True if filename ends with .arxml or .xml (case-insensitive)."""
+    if not filename:
+        return False
+    lower = filename.lower()
+    return lower.endswith(".arxml") or lower.endswith(".xml")
+
+
 def load_arxml_file(file_path):
     """Reads and parses a single ARXML file."""
     if not os.path.exists(file_path):
@@ -63,7 +81,7 @@ def load_arxml_folder(folder_path):
     failed_files = []
 
     for file_name in os.listdir(folder_path):
-        if file_name.endswith(".arxml"):
+        if is_arxml_only(file_name):
             file_path = os.path.join(folder_path, file_name)
             try:
                 root = load_arxml_file(file_path)

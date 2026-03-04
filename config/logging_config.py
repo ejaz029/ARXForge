@@ -1,7 +1,11 @@
 import os
 import logging
 import yaml
+from dotenv import load_dotenv
 from langchain_groq import ChatGroq
+
+# Load .env file as fallback
+load_dotenv()
 
 # ✅ Load config.yaml
 def load_config():
@@ -15,8 +19,8 @@ class Config:
 
     # ✅ AI Settings
     AI_PROVIDER = "groq"
-    AI_MODEL = "mixtral-8x7b"
-    GROQ_API_KEY = config.get("groq_api_key")
+    AI_MODEL = "llama-3.1-8b-instant"  # Updated to current working model
+    GROQ_API_KEY = config.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")  # Try YAML first, then .env
 
     if not GROQ_API_KEY:
         raise ValueError("🚨 Missing GROQ_API_KEY in config.yaml!")
@@ -40,9 +44,12 @@ class Config:
     @staticmethod
     def get_llm():
         """Returns a new instance of the LLM."""
+        api_key = Config.GROQ_API_KEY
+        if not api_key:
+            raise ValueError("GROQ_API_KEY not found in config.yaml or .env file!")
         return ChatGroq(
             model_name=Config.AI_MODEL,
-            groq_api_key=Config.GROQ_API_KEY
+            api_key=api_key
         )
 
 # ✅ Logging Setup

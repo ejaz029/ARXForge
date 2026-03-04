@@ -1,5 +1,5 @@
-GROQ_API_KEY: "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"
-AI_MODEL: "mixtral-8x7b"
+GROQ_API_KEY: "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"
+AI_MODEL: "llama-3.1-8b-instant"
 UPLOAD_FOLDER: "uploads"
 ALLOWED_EXTENSIONS: ["arxml"]
 ENABLE_RAG_VALIDATION: true
@@ -7,3 +7,11 @@ ENABLE_SCHEMA_CHECK: true
 ENABLE_CONSISTENCY_CHECKS: true
 DEPLOYMENT_ENV: "local"
 log_file: "logs/app.log"
+
+# Agent Configuration
+AGENT_ENABLED: true
+AGENT_MAX_ITERATIONS: 10
+AGENT_PLANNING_MODE: true
+AGENT_TEMPERATURE: 0.2
+# Set to true to enable agent debug logging (e.g. tool registry, verbose logs)
+DEBUG_AGENT: false

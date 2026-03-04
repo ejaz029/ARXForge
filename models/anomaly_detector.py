@@ -1,16 +1,30 @@
+import os
+import warnings
+import logging
 import numpy as np
 from sklearn.ensemble import IsolationForest
 from sentence_transformers import SentenceTransformer
 import xml.etree.ElementTree as ET
+from config.device_utils import get_device, get_device_name
+
+# Suppress TensorFlow warnings
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+logging.getLogger('tensorflow').setLevel(logging.ERROR)
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="tensorflow")
+warnings.filterwarnings("ignore", message=".*tf.losses.*deprecated.*")
 
 class AnomalyDetector:
     def __init__(self, model_name="all-MiniLM-L6-v2"):
         """
         Initializes the anomaly detector with an embedding model and Isolation Forest.
+        Automatically uses GPU if available.
         """
-        self.encoder = SentenceTransformer(model_name)
+        device = get_device()
+        self.encoder = SentenceTransformer(model_name, device=device)
         self.model = IsolationForest(contamination=0.05, random_state=42)
         self.fitted = False
+        print(f"AnomalyDetector initialized on {get_device_name()}")
     
     def extract_text_data(self, root):
         """

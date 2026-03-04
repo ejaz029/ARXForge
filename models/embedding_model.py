@@ -1,11 +1,25 @@
+import os
+import warnings
+import logging
 from langchain_huggingface import HuggingFaceEmbeddings  # Free embeddings
-from langchain.vectorstores import FAISS
+from langchain_community.vectorstores import FAISS
+from config.device_utils import get_device, get_device_name
+
+# Suppress TensorFlow warnings
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+logging.getLogger('tensorflow').setLevel(logging.ERROR)
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="tensorflow")
 
 class EmbeddingModel:
     def __init__(self):
-        """Initialize the embedding model using OpenAI."""
-        self.embeddings = HuggingFaceEmbeddings()
+        """Initialize the embedding model using HuggingFace embeddings with automatic GPU detection."""
+        device = get_device()
+        self.embeddings = HuggingFaceEmbeddings(
+            model_kwargs={"device": device}
+        )
         self.vector_db = None
+        print(f"EmbeddingModel initialized on {get_device_name()}")
 
     def build_vector_db(self, texts):
         """

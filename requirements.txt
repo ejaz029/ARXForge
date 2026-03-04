@@ -1,4 +1,4 @@
-# Core Frameworks & APIs
+# Core Web
 streamlit
 fastapi
 uvicorn
@@ -7,29 +7,29 @@ uvicorn
 xmlschema
 lxml
 
-# AI & Machine Learning
-langchain
-langraph
-openai
+# AI Agent Framework
+langchain==0.1.16
+langgraph==0.0.38
+langchain-groq
 groq
-transformers
+
+# RAG
 sentence-transformers
-gensim
+faiss-cpu
+
+# Data Processing
 numpy
 pandas
 scikit-learn
-tensorflow
-pytorch 
 
 # Testing
 pytest
-unittest
-
-#python
-python --version : python 3.11.6
+pytest-timeout>=2.0.0
 
 
+python-dotenv
 
 
-# to activate venv :  venv\Scripts\activate
-# to run chatbot in streamlit :  streamlit run "D:\arxml\AUTOSAR_ARXML_Validator (MAIN)\app\main.py"
+
+
+
