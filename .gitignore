@@ -1,3 +1,11 @@
 .env
 config.yaml
 venv
+venvZ/
+__pycache__/
+*.pyc
+.cursor/
+.streamlit/secrets.toml
+*.log
+logs/
+uploads/
