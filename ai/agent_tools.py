@@ -58,6 +58,10 @@ from validators.version_compatibility import (
 )
 from validators.component_ref_checks import validate_component_references
 from validators.duplicates import find_duplicate_ports
+from validators.architecture_queries import (
+    list_swcs_using_interface,
+    list_dependents_of_signal_or_message,
+)
 
 
 def _parse_arxml_file(file_path: str) -> Optional[ET.Element]:
@@ -684,6 +688,48 @@ def duplicate_ports_tool(file_path: str) -> str:
         return f"❌ Error checking duplicate ports: {str(e)}"
 
 
+@tool
+def list_swcs_using_interface_tool(file_path: str, interface_name: str) -> str:
+    """List which SWCs (software components) use a given interface by name.
+    Use when the user asks: which SWCs use interface X, which components use this interface, who uses interface X.
+
+    Args:
+        file_path: Path to the ARXML file
+        interface_name: Short name of the interface (e.g. CompA_SR_Interface1, SpeedInterface)
+    """
+    try:
+        root = _parse_arxml_file(file_path)
+        if root is None:
+            return f"❌ Could not parse {os.path.basename(file_path)}"
+        swcs = list_swcs_using_interface(root, interface_name)
+        if not swcs:
+            return f"No SWCs reference interface '{interface_name}' in {os.path.basename(file_path)}."
+        return f"SWCs using interface '{interface_name}': " + ", ".join(swcs)
+    except Exception as e:
+        return f"❌ Error: {str(e)}"
+
+
+@tool
+def list_dependents_of_signal_or_message_tool(file_path: str, name: str) -> str:
+    """List what depends on a signal or message (interfaces and SWCs that reference it).
+    Use when the user asks: what depends on Message1, which components use this signal, who depends on X.
+
+    Args:
+        file_path: Path to the ARXML file
+        name: Short name of the signal or message (e.g. Message1, Signal12)
+    """
+    try:
+        root = _parse_arxml_file(file_path)
+        if root is None:
+            return f"❌ Could not parse {os.path.basename(file_path)}"
+        dependents = list_dependents_of_signal_or_message(root, name)
+        if not dependents:
+            return f"No dependents found for '{name}' in {os.path.basename(file_path)}."
+        return f"Dependents of '{name}': " + ", ".join(dependents)
+    except Exception as e:
+        return f"❌ Error: {str(e)}"
+
+
 def get_all_tools():
     """Returns a list of all available agent tools."""
     return [
@@ -704,6 +750,8 @@ def get_all_tools():
         validate_version_compatibility_tool,
         validate_component_refs_tool,
         duplicate_ports_tool,
+        list_swcs_using_interface_tool,
+        list_dependents_of_signal_or_message_tool,
     ]
 
 

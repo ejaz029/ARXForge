@@ -1,0 +1,21 @@
+# ARXForge — Example configuration (no secrets)
+# Copy to config.yaml and set GROQ_API_KEY there, OR set GROQ_API_KEY in .env only (recommended for production).
+
+# AI (Groq) — prefer setting GROQ_API_KEY in .env; override here only if needed
+# GROQ_API_KEY: "your-groq-api-key-here"
+
+AI_MODEL: "llama-3.1-8b-instant"
+UPLOAD_FOLDER: "uploads"
+ALLOWED_EXTENSIONS: ["arxml"]
+ENABLE_RAG_VALIDATION: true
+ENABLE_SCHEMA_CHECK: true
+ENABLE_CONSISTENCY_CHECKS: true
+DEPLOYMENT_ENV: "local"
+log_file: "logs/app.log"
+
+# Agent
+AGENT_ENABLED: true
+AGENT_MAX_ITERATIONS: 10
+AGENT_PLANNING_MODE: true
+AGENT_TEMPERATURE: 0.2
+DEBUG_AGENT: false

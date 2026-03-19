@@ -2,38 +2,12 @@ import os
 import streamlit as st
 from ai.rag_validation import process_query_structured
 from ai.agent_tools import get_all_tools
-from app.file_utils import is_arxml_only
+from app.file_utils import is_arxml_only, safe_upload_filename, MAX_UPLOAD_BYTES
 
 AGENT_LAST_RUN_KEY = "agent_last_run"
 AGENT_CHAT_HISTORY_KEY = "agent_chat_history"
 AGENT_CHAT_HISTORY_MAX = 30
 INPUT_KEY_PREFIX = "agent_cmd_"
-
-
-def _debug_log(location: str, message: str, data: dict | None = None, hypothesis_id: str = "") -> None:
-    """Append a single NDJSON debug log line for layout / theme diagnostics."""
-    try:
-        import json, time, os
-
-        log_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            ".cursor",
-            "debug.log",
-        )
-        payload = {
-            "id": f"log_{int(time.time() * 1000)}",
-            "timestamp": int(time.time() * 1000),
-            "location": location,
-            "message": message,
-            "data": data or {},
-            "hypothesisId": hypothesis_id,
-        }
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload) + "\n")
-    except Exception:
-        # Debug logging must never break the app.
-        return
 
 
 def inject_theme():
@@ -45,12 +19,6 @@ def _inject_theme():
     """ChatGPT-like grey palette: soft grey background, light grey panels, no white canvas.
     Uses targeted font-family (no global *) so Streamlit icon font is not overridden.
     """
-    _debug_log(
-        "ai_chatbot._inject_theme",
-        "Injecting theme CSS including Fossil right pane rules",
-        {"hypothesis": "H_css_applied"},
-        hypothesis_id="H_css_applied",
-    )
     st.markdown(
         """
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -65,26 +33,36 @@ def _inject_theme():
     [data-testid="stSidebar"] label,
     .stMarkdown, .stText, .stTextInput label, .stButton button,
     [data-testid="stSelectbox"] label { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif !important; }
-    [data-testid="stAppViewContainer"] { background-color: #f7f7f8 !important; }
-    [data-testid="stSidebar"] { background-color: #e8e8e8 !important; }
-    [data-testid="stSidebar"] .stMarkdown { color: #262626 !important; }
-    .stMarkdown, .stText, .stTextInput label, p { color: #262626 !important; }
-    .stMarkdown strong { color: #262626 !important; }
-    [data-testid="stExpander"] label { color: #262626 !important; font-family: 'Inter', sans-serif !important; }
+    /* Option 3: Neutral mid-grey (enterprise) */
+    [data-testid="stAppViewContainer"] { background-color: #2F3437 !important; }
+    /* Brand title ARXForge accent color */
+    [data-testid="stAppViewContainer"] h1 { color: #B9D9EB !important; }
+    /* AI Agent subheader and Upload ARXML label – white */
+    [data-testid="stAppViewContainer"] h2, [data-testid="stAppViewContainer"] h3 { color: #ffffff !important; }
+    /* Left dashboard (sidebar) in darker tone */
+    [data-testid="stSidebar"] { background-color: #1F2022 !important; }
+    [data-testid="stSidebar"] .stMarkdown { color: #D0D4D7 !important; }
+    .stMarkdown, .stText, .stTextInput label, p { color: #FFFFFF !important; }
+    .stMarkdown strong { color: #FFFFFF !important; }
+    [data-testid="stExpander"] label { color: #FFFFFF !important; font-family: 'Inter', sans-serif !important; }
     [data-testid="stExpander"] label > span:first-of-type { font-family: "Material Symbols Rounded", "Material Symbols", sans-serif !important; }
-    .stTextInput input { background-color: #ffffff !important; color: #262626 !important; border: 1px solid #d3d3d3 !important; }
+    /* Cards/inputs: neutral mid-grey #3A3F44 */
+    .stTextInput input { background-color: #3A3F44 !important; color: #F7F7F7 !important; border: 1px solid #4A4F55 !important; }
+    .stTextInput input::placeholder { color: #a0a0a0 !important; }
     .stTextInput input:focus { border-color: #22c55e !important; box-shadow: 0 0 0 1px #22c55e !important; }
-    .stTextInput label { color: #262626 !important; }
+    .stTextInput label { color: #D0D4D7 !important; }
     .stButton button { background-color: #22c55e !important; color: #fff !important; border: none !important; }
-    .stButton button:hover { background-color: #16a34a !important; }
-    [data-testid="stSelectbox"] label { color: #262626 !important; }
-    [data-testid="stAlert"] { background-color: #f0f0f0 !important; border-left: 4px solid #22c55e !important; }
-    .agent-panel { background-color: #ebebeb; border: 1px solid #d3d3d3; border-radius: 8px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.06); margin-bottom: 12px; }
-    div[data-testid="column"] { background-color: #f0f0f0 !important; border: 1px solid #d3d3d3 !important; border-radius: 8px !important; padding: 12px 16px !important; box-shadow: 0 1px 2px rgba(0,0,0,0.06) !important; }
-    /* Fossil #787276: entire right pane (Command + Output + Agent Activity) on AI Agent */
+    .stButton button:hover { background-color: #1e9e4d !important; }
+    [data-testid="stSelectbox"] { background-color: #3A3F44 !important; }
+    [data-testid="stSelectbox"] > div { background-color: #3A3F44 !important; color: #F7F7F7 !important; border: 1px solid #4A4F55 !important; }
+    [data-testid="stSelectbox"] label { color: #D0D4D7 !important; }
+    [data-testid="stAlert"] { background-color: #3A3F44 !important; border-left: 4px solid #22c55e !important; border-color: #4A4F55 !important; }
+    .agent-panel { background-color: #3A3F44; border: 1px solid #4A4F55; border-radius: 8px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.06); margin-bottom: 12px; }
+    div[data-testid="column"] { background-color: transparent !important; border: 1px solid #4A4F55 !important; border-radius: 8px !important; padding: 12px 16px !important; box-shadow: 0 1px 2px rgba(0,0,0,0.06) !important; }
+    /* Right pane (Command + Output + Agent Activity) */
     [data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child {
-      background-color: #787276 !important;
-      border: 1px solid #5c5c5c !important;
+      background-color: #3A3F44 !important;
+      border: 1px solid #4A4F55 !important;
       border-radius: 8px !important;
       padding: 12px 16px !important;
       min-height: 70vh !important;
@@ -95,24 +73,44 @@ def _inject_theme():
       border: none !important;
       box-shadow: none !important;
     }
-    /* Light text on Fossil right pane for readability */
     [data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child .stMarkdown,
     [data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child p,
     [data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child label {
-      color: #f0f0f0 !important;
+      color: #D0D4D7 !important;
     }
     [data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child .stCaption {
-      color: #e0e0e0 !important;
+      color: #D0D4D7 !important;
     }
-    /* Compare File B badge remains a compact Fossil chip */
     #compare-file-b-fossil {
-      background-color: #787276 !important;
-      color: #f0f0f0 !important;
-      border: 2px solid #5c5c5c !important;
+      background-color: #3A3F44 !important;
+      color: #F7F7F7 !important;
+      border: 2px solid #4A4F55 !important;
       border-radius: 8px !important;
       padding: 6px 10px !important;
       margin-bottom: 8px !important;
       font-weight: 500 !important;
+    }
+    /* Upload ARXML (file uploader) – text white */
+    [data-testid="stFileUploader"] {
+      background-color: #3A3F44 !important;
+      color: #ffffff !important;
+      border: 1px solid #4A4F55 !important;
+      border-radius: 8px !important;
+    }
+    [data-testid="stFileUploader"] section { background-color: #3A3F44 !important; color: #ffffff !important; border-color: #4A4F55 !important; }
+    [data-testid="stFileUploader"] .stMarkdown, [data-testid="stFileUploader"] p, [data-testid="stFileUploader"] label, [data-testid="stFileUploader"] span { color: #ffffff !important; }
+    [data-testid="stFileUploader"] button {
+      background-color: #3A3F44 !important;
+      color: #F7F7F7 !important;
+      border: 1px solid #4A4F55 !important;
+    }
+    [data-testid="stFileUploader"] button:hover { background-color: #454A52 !important; }
+    /* Agent Activity panel */
+    #agent-activity-fossil {
+      background-color: #3A3F44 !important;
+      border: 1px solid #4A4F55 !important;
+      border-radius: 8px !important;
+      padding: 12px !important;
     }
     </style>
     """,
@@ -205,14 +203,19 @@ def chatbot_interface(upload_dir="uploads"):
 
     uploaded_file = st.file_uploader("Upload ARXML", type=None, accept_multiple_files=False, key="agent_arxml_upload")
     if uploaded_file is not None:
-        if not (uploaded_file.name and is_arxml_only(uploaded_file.name)):
-            st.error("Invalid file type. Only .arxml files are accepted.")
+        safe_name = safe_upload_filename(uploaded_file.name)
+        if not safe_name:
+            st.error("Invalid file type or filename. Only .arxml files with a safe name are accepted.")
         else:
-            path = os.path.join(upload_dir, uploaded_file.name)
-            with open(path, "wb") as f:
-                f.write(uploaded_file.getvalue())
-            st.session_state["agent_file_select"] = uploaded_file.name
-            st.rerun()
+            data = uploaded_file.getvalue()
+            if len(data) > MAX_UPLOAD_BYTES:
+                st.error(f"File too large. Maximum size is {MAX_UPLOAD_BYTES // (1024*1024)} MB.")
+            else:
+                path = os.path.join(upload_dir, safe_name)
+                with open(path, "wb") as f:
+                    f.write(data)
+                st.session_state["agent_file_select"] = safe_name
+                st.rerun()
 
     try:
         arxml_files = sorted(f for f in os.listdir(upload_dir) if is_arxml_only(f))
@@ -233,12 +236,6 @@ def chatbot_interface(upload_dir="uploads"):
     if AGENT_LAST_RUN_KEY not in st.session_state:
         st.session_state[AGENT_LAST_RUN_KEY] = None
 
-    _debug_log(
-        "ai_chatbot.chatbot_interface_layout",
-        "Rendering AI Agent 2-column layout (left project, right pane)",
-        {"layout": "1-4"},
-        hypothesis_id="H_layout_used",
-    )
     col_left, col_right_outer = st.columns([1, 4])
     tool_count = len(get_all_tools())
 

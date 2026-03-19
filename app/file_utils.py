@@ -47,6 +47,19 @@ import xml.etree.ElementTree as ET
 
 ARXML_EXTENSIONS = (".arxml", ".xml")
 
+# Max upload size (bytes) for industry safety; ~50 MB
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+
+
+def safe_upload_filename(filename):
+    """Return a safe basename for uploads (prevents path traversal). Only .arxml allowed."""
+    if not filename or not is_arxml_only(filename):
+        return None
+    base = os.path.basename(filename.strip())
+    if not base or ".." in base or os.path.sep in base:
+        return None
+    return base
+
 
 def is_arxml_only(filename):
     """Return True if filename ends with .arxml only (case-insensitive). Use for upload validation."""

@@ -103,6 +103,13 @@ def classify_intent(user_query: str) -> IntentType:
     if any(phrase in query_lower for phrase in audit_phrases):
         return "analysis"
 
+    # NL architecture queries: which SWCs use X, what depends on Y -> analysis (use query tools)
+    if any(phrase in query_lower for phrase in (
+        "which swc", "which swcs", "which component", "which components",
+        "who uses", "what depends on", "what uses", "which use interface"
+    )):
+        return "analysis"
+
     # Priority 2: Check for question words (but not if it's comparison)
     question_words = ["what", "how", "why", "when", "where", "explain", "describe", "tell me"]
     question_patterns = [
@@ -252,7 +259,9 @@ def get_recommended_tools(intent: IntentType) -> List[str]:
             "validate_memory_tool",
             "validate_rte_tool",
             "validate_diagnostics_tool",
-            "validate_ecu_bsw_tool"
+            "validate_ecu_bsw_tool",
+            "list_swcs_using_interface_tool",
+            "list_dependents_of_signal_or_message_tool"
         ],
         "question": [],  # Use RAG for questions
         "comparison": [

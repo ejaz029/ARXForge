@@ -1,5 +1,7 @@
 .env
+.env.local
 config.yaml
+config/.env
 venv
 venvZ/
 __pycache__/

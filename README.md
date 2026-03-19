@@ -56,7 +56,8 @@ project-root/
 pip install -r requirements.txt
 ```
 
-- **Config**: Create or copy `config.yaml` with `GROQ_API_KEY` (or set `GROQ_API_KEY` in `.env`). Do not commit `config.yaml` if it contains secrets (it is listed in `.gitignore`).
+<<<<<<< HEAD
+- **Config**: Set `GROQ_API_KEY` in a `.env` file (recommended for clients). Copy `env.example` to `.env` and add your key. Optionally copy `config.example.yaml` to `config.yaml` for other settings; do not commit files that contain secrets (they are in `.gitignore`).
 
 ---
 
@@ -132,5 +133,11 @@ On the **Compare ARXML** page, select File A and File B from the files in `uploa
 
 ## Environment and .gitignore
 
-- **Environment**: Set `GROQ_API_KEY` in `config.yaml` or in a `.env` file.
+- **Environment**: Set `GROQ_API_KEY` in `.env` (recommended) or in `config.yaml`. Use `env.example` and `config.example.yaml` as templates; never commit real keys.
 - **Ignored paths**: `venv/`, `venvZ/`, `config.yaml`, `.env`, `uploads/`, `logs/`, `__pycache__/`, and similar build/artifact paths are in `.gitignore`.
+
+---
+
+## Industry readiness and client handoff
+
+Before submitting to clients, see **[INDUSTRY_READINESS.md](INDUSTRY_READINESS.md)** for a security, deployment, and testing checklist and pre-submission steps.

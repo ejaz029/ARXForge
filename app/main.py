@@ -96,6 +96,25 @@ logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
 
 import streamlit as st
 
+# Suppress noisy WebSocketClosedError / StreamClosedError task traces from Tornado
+try:
+    import asyncio
+
+    def _streamlit_ws_exception_handler(loop, ctx):
+        exc = ctx.get("exception")
+        if exc is not None:
+            cname = type(exc).__name__
+            if cname in ("WebSocketClosedError", "StreamClosedError", "ConnectionResetError"):
+                return
+        if getattr(loop, "_default_exception_handler", None) is not None:
+            loop._default_exception_handler(loop, ctx)
+
+    _loop = asyncio.get_event_loop()
+    if _loop is not None:
+        _loop.set_exception_handler(_streamlit_ws_exception_handler)
+except Exception:
+    pass
+
 # Additional warning suppression
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -121,7 +140,7 @@ except ImportError:
     pass
 
 # ✅ Set page config
-st.set_page_config(page_title="AUTOSAR ARXML Validator & AI Agent", layout="wide")
+st.set_page_config(page_title="ARXForge — AUTOSAR ARXML Validator & AI Agent", layout="wide")
 
 # ✅ Fix import path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -130,11 +149,15 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from ai import ai_chatbot as _ai_chatbot
 from ai.ai_chatbot import chatbot_interface, AGENT_LAST_RUN_KEY, AGENT_CHAT_HISTORY_KEY
 inject_theme = getattr(_ai_chatbot, "inject_theme", lambda: None)
-from app.file_utils import load_arxml_folder, is_arxml_only
+from app.file_utils import load_arxml_folder, is_arxml_only, safe_upload_filename, MAX_UPLOAD_BYTES
 from validators.schema_validation import validate_arxml_schema
 from validators.data_consistency import validate_data
 from validators.compare_arxml import compare_two_arxml_files
+from validators.audit_runner import run_audit_validators
+from validators.arxml_graph import build_arxml_graph
 from ai.compare_report import summarize_comparison_with_llm
+from app.graph_visualization import render_arxml_graph_pyvis
+import streamlit.components.v1 as components
 
 # ✅ Uploads folder
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "..", "uploads")
@@ -339,6 +362,63 @@ def compare_arxml_interface(upload_dir):
                             f"`{g.get('parent_b', '')}`  [{g.get('type', '')}] renamed: {renames}"
                         )
 
+            # Impact Analysis: affected SWCs, signals, interfaces, RTE connections per changed port/interface
+            impact_list = out.get("dependency_impact") or []
+            if impact_list:
+                st.markdown("---")
+                impact_to_show = impact_list[:20]
+                with st.expander("**Impact Analysis**", expanded=len(impact_to_show) <= 5):
+                    for di in impact_to_show:
+                        element = di.get("element", "")
+                        change = di.get("change", "")
+                        st.markdown(f"**Port/Interface {element}** ({change})")
+                        swc_names = di.get("affected_swc_names") or []
+                        if swc_names:
+                            st.markdown("**Affected SWCs**")
+                            for name in swc_names:
+                                st.markdown(f"- {name}")
+                        else:
+                            comps = di.get("affected_components") or []
+                            segments = [p.strip("/").split("/")[-1] for p in comps if p]
+                            seen = set()
+                            if segments:
+                                st.markdown("**Affected SWCs**")
+                                for seg in segments:
+                                    if seg and seg not in seen:
+                                        seen.add(seg)
+                                        st.markdown(f"- {seg}")
+                        affected_signals = di.get("affected_signals") or []
+                        if affected_signals:
+                            st.markdown("**Affected signals**")
+                            for sig in affected_signals[:15]:
+                                st.markdown(f"- {sig}")
+                            if len(affected_signals) > 15:
+                                st.caption(f"... and {len(affected_signals) - 15} more")
+                        affected_interfaces = di.get("affected_interfaces") or []
+                        if affected_interfaces:
+                            st.markdown("**Affected interfaces**")
+                            for iface in affected_interfaces:
+                                st.markdown(f"- {iface}")
+                        conn_summary = di.get("connector_summary", "")
+                        if conn_summary:
+                            st.markdown(f"**Affected connectors:** {conn_summary}")
+                        rte = di.get("rte_mappings") or {}
+                        file_a_count = rte.get("file_a", 0)
+                        file_b_count = rte.get("file_b", 0)
+                        if file_a_count or file_b_count:
+                            st.markdown(
+                                f"**Affected RTE connections:** File A: {file_a_count} mapping(s), File B: {file_b_count} mapping(s)"
+                            )
+                        else:
+                            st.markdown("**Affected RTE connections:** N/A")
+                        severity = di.get("impact_severity", "")
+                        if severity:
+                            st.markdown(f"Impact severity: **{severity}**")
+                        score = di.get("impact_score")
+                        if score is not None:
+                            st.markdown(f"Impact score: **{score} / 10**")
+                        st.markdown("")
+
         st.markdown("---")
         st.caption(
             "Report structure: **COMPARISON SUMMARY** (Architecture / Interface / Data model) | "
@@ -356,6 +436,287 @@ def compare_arxml_interface(upload_dir):
         st.info("Click **Compare** to compare the selected files (File A vs File B).")
 
 
+def architecture_graph_interface(upload_dir):
+    """Architecture Graph: select ARXML, show SWC -> Port -> Interface graph."""
+    st.subheader("Architecture Graph")
+    os.makedirs(upload_dir, exist_ok=True)
+    try:
+        arxml_files = sorted(f for f in os.listdir(upload_dir) if is_arxml_only(f))
+    except FileNotFoundError:
+        st.error("Upload directory not found.")
+        return
+    if not arxml_files:
+        st.info("Upload ARXML files in AI Agent or Upload & View first.")
+        return
+    st.markdown("Configure view")
+    col_opts1, col_opts2 = st.columns(2)
+    with col_opts1:
+        show_components = st.checkbox("Show components", value=True, key="graph_show_components")
+        show_connections = st.checkbox("Show connections", value=True, key="graph_show_connections")
+    with col_opts2:
+        show_interfaces = st.checkbox("Show interfaces", value=True, key="graph_show_interfaces")
+        show_visual = st.checkbox("Show visual graph", value=False, key="graph_show_visual")
+    search_term = st.text_input("Search component (optional)", value="", key="graph_search")
+
+    graph_file = st.selectbox("Select ARXML file", arxml_files, key="graph_file")
+    if not graph_file:
+        return
+    path = os.path.join(upload_dir, graph_file)
+    if st.button("Build graph", key="build_graph_btn"):
+        with st.spinner("Building graph..."):
+            graph, err = build_arxml_graph(path)
+        if err:
+            st.error(err)
+            return
+        st.session_state["_arxml_graph"] = graph
+        st.session_state["_arxml_graph_file"] = graph_file
+    g = st.session_state.get("_arxml_graph")
+    if g and st.session_state.get("_arxml_graph_file") == graph_file:
+        # Build helper indices
+        port_to_swc: dict[str, str] = {}
+        for swc in g.components.values():
+            for p in swc.ports:
+                port_to_swc[p.name] = swc.name
+        # (src_swc, dst_swc) -> {"count": N, "interfaces": [names]}
+        conn_data: dict[tuple[str, str], dict] = {}
+        for e in g.edges:
+            if e.kind != "swc-swc":
+                continue
+            src = port_to_swc.get(e.source, e.source)
+            tgt = port_to_swc.get(e.target, e.target)
+            key = (src, tgt)
+            if key not in conn_data:
+                conn_data[key] = {"count": 0, "interfaces": []}
+            conn_data[key]["count"] += 1
+            if getattr(e, "interface_name", "") and e.interface_name not in conn_data[key]["interfaces"]:
+                conn_data[key]["interfaces"].append(e.interface_name)
+        # Interface usage counts
+        iface_users: dict[str, set[str]] = {}
+        for swc in g.components.values():
+            for p in swc.ports:
+                if p.interface:
+                    iface_users.setdefault(p.interface, set()).add(swc.name)
+        # Summary bar
+        st.markdown(
+            f"Components: **{len(g.components)}**  |  "
+            f"Interfaces: **{len(g.interfaces)}**  |  "
+            f"Connections: **{len(conn_data)}**"
+        )
+        # Component detail view: select one SWC to see ports, interfaces, connections
+        detail_candidates = [n for n in g.components if n != "external_component" or g.components[n].ports]
+        if detail_candidates:
+            selected_swc = st.selectbox(
+                "Component details",
+                options=[""] + detail_candidates,
+                format_func=lambda x: "(select component)" if x == "" else x,
+                key="graph_detail_swc",
+            )
+            if selected_swc:
+                swc = g.components[selected_swc]
+                with st.expander("Component Details", expanded=True):
+                    st.markdown(f"**Ports** ({len(swc.ports)})")
+                    by_iface_detail: dict[str, list] = {}
+                    for p in swc.ports:
+                        by_iface_detail.setdefault(p.interface or "(no interface)", []).append(p)
+                    for iface_name, ports in by_iface_detail.items():
+                        st.caption(f"Interface: {iface_name}")
+                        for p in ports:
+                            st.caption(f"  {p.port_type} {p.name}")
+                    iface_list = sorted({p.interface for p in swc.ports if p.interface})
+                    st.markdown(f"**Interfaces used** ({len(iface_list)})")
+                    for ifn in iface_list:
+                        st.caption(f"  {ifn}")
+                    outgoing = [(tgt, data) for (src, tgt), data in conn_data.items() if src == selected_swc]
+                    incoming = [(src, data) for (src, tgt), data in conn_data.items() if tgt == selected_swc]
+                    st.markdown("**Connections**")
+                    if outgoing:
+                        st.caption("Outgoing:")
+                        for tgt, data in outgoing:
+                            ifaces = data.get("interfaces", []) or []
+                            lbl = ", ".join(ifaces[:8]) if ifaces else str(data.get("count", 0))
+                            if len(ifaces) > 8:
+                                lbl += f" (+{len(ifaces) - 8} more)"
+                            st.caption(f"  → {tgt} ({lbl})")
+                    if incoming:
+                        st.caption("Incoming:")
+                        for src, data in incoming:
+                            ifaces = data.get("interfaces", []) or []
+                            lbl = ", ".join(ifaces[:8]) if ifaces else str(data.get("count", 0))
+                            if len(ifaces) > 8:
+                                lbl += f" (+{len(ifaces) - 8} more)"
+                            st.caption(f"  ← {src} ({lbl})")
+                    if not outgoing and not incoming:
+                        st.caption("  No SWC–SWC connections.")
+        # Components section (hide external_component when it has no ports)
+        if show_components:
+            st.markdown("**Components**")
+            for name, swc in g.components.items():
+                if name == "external_component" and not swc.ports:
+                    continue
+                if search_term and search_term.lower() not in name.lower():
+                    continue
+                with st.expander(f"SWC: {name}", expanded=len(g.components) <= 5):
+                    by_iface: dict[str, list] = {}
+                    for p in swc.ports:
+                        by_iface.setdefault(p.interface or "(no interface)", []).append(p)
+                    for iface_name, ports in by_iface.items():
+                        st.caption(f"Interface: {iface_name}")
+                        for p in ports:
+                            st.caption(f"  {p.port_type} {p.name}")
+        # Interfaces section
+        if show_interfaces:
+            st.markdown("**Interfaces**")
+            for name, iface in list(g.interfaces.items())[:50]:
+                prefix = "SR" if iface.kind == "SENDER-RECEIVER-INTERFACE" else (
+                    "CS" if iface.kind == "CLIENT-SERVER-INTERFACE" else iface.kind
+                )
+                users = iface_users.get(name, set())
+                used_by = f" (used by {len(users)} SWC(s))" if users else ""
+                st.caption(f"  {prefix}: {name}{used_by}")
+            if len(g.interfaces) > 50:
+                st.caption(f"  ... and {len(g.interfaces) - 50} more")
+        # Connections section (with interface names per pair)
+        if show_connections and conn_data:
+            st.markdown("**Connections**")
+            for (src, tgt), data in list(conn_data.items())[:50]:
+                if search_term and not (
+                    search_term.lower() in src.lower() or search_term.lower() in tgt.lower()
+                ):
+                    continue
+                count = data.get("count", 0)
+                interfaces = data.get("interfaces", []) or []
+                count_str = f" ({count})" if count != 1 else ""
+                st.caption(f"  **{src} → {tgt}**{count_str}")
+                if interfaces:
+                    for iface in interfaces[:15]:
+                        st.caption(f"    — {iface}")
+                    if len(interfaces) > 15:
+                        st.caption(f"    — ... and {len(interfaces) - 15} more")
+        # Visual graph: view selector (Simple Graphviz | Interactive PyVis), then render
+        if show_visual and conn_data:
+            # Filter by search term for both views
+            if search_term and search_term.strip():
+                q = search_term.strip().lower()
+                filtered_conn_data = {
+                    (src, tgt): data
+                    for (src, tgt), data in conn_data.items()
+                    if q in src.lower() or q in tgt.lower()
+                }
+            else:
+                filtered_conn_data = conn_data
+
+            viz_mode = st.radio(
+                "Visualization",
+                options=["Simple (Graphviz)", "Interactive (PyVis)"],
+                index=0,
+                key="graph_viz_mode",
+                horizontal=True,
+            )
+
+            if viz_mode == "Interactive (PyVis)":
+                try:
+                    html = render_arxml_graph_pyvis(
+                        g,
+                        filtered_conn_data,
+                        search_term=search_term or "",
+                        height="600px",
+                        width="100%",
+                    )
+                    st.caption("Rectangle = Component (SWC). Edge label = Interface(s). Hover for details.")
+                    components.html(html, height=650, scrolling=False)
+                except Exception as e:
+                    st.warning(f"Interactive graph failed: {e}. Use Simple (Graphviz) or install: pip install pyvis")
+            else:
+                dot_lines = ["digraph G {", "  rankdir=LR;"]
+                all_nodes = set()
+                for (src, tgt) in filtered_conn_data:
+                    all_nodes.add(src)
+                    all_nodes.add(tgt)
+                prefix_to_nodes: dict[str, set[str]] = {}
+                for n in all_nodes:
+                    pre = n.split("_")[0] if "_" in n else n
+                    prefix_to_nodes.setdefault(pre, set()).add(n)
+                for pre, nodes in prefix_to_nodes.items():
+                    if len(nodes) < 2:
+                        continue
+                    dot_lines.append(f"  subgraph cluster_{pre} {{")
+                    dot_lines.append(f'    label="{pre}";')
+                    for node in sorted(nodes):
+                        dot_lines.append(f'    "{node}";')
+                    dot_lines.append("  }")
+                for (src, tgt), data in filtered_conn_data.items():
+                    interfaces = data.get("interfaces", []) or []
+                    count = data.get("count", 0)
+                    if interfaces:
+                        label = "\\n".join(interfaces[:5]) if len(interfaces) <= 5 else "\\n".join(interfaces[:4]) + "\\n..."
+                    else:
+                        label = str(count) if count > 1 else ""
+                    label_attr = f' [label="{label}"]' if label else ""
+                    dot_lines.append(f"  \"{src}\" -> \"{tgt}\"{label_attr};")
+                dot_lines.append("}")
+                dot_source = "\n".join(dot_lines)
+                st.graphviz_chart(dot_source)
+
+
+def system_analysis_interface(upload_dir):
+    """Multi-file system analysis: run audit on all ARXML files in uploads and show summary table."""
+    st.subheader("System Analysis (multi-file)")
+    os.makedirs(upload_dir, exist_ok=True)
+    try:
+        arxml_files = sorted(f for f in os.listdir(upload_dir) if is_arxml_only(f))
+    except FileNotFoundError:
+        st.error("Upload directory not found.")
+        return
+    if not arxml_files:
+        st.info("Upload ARXML files in AI Agent or Upload & View first.")
+        return
+    xsd_path = os.path.join(os.path.dirname(__file__), "..", "AUTOSAR_schema.xsd")
+    if st.button("Analyze all files", key="system_analysis_btn"):
+        progress = st.progress(0)
+        results_per_file = []
+        for i, f in enumerate(arxml_files):
+            path = os.path.join(upload_dir, f)
+            rows = run_audit_validators(path, xsd_path)
+            pass_count = sum(1 for r in rows if r.get("status") == "PASS")
+            fail_count = sum(1 for r in rows if r.get("status") == "FAIL")
+            warn_count = sum(1 for r in rows if r.get("status") == "WARNING")
+            results_per_file.append({
+                "file": f,
+                "pass": pass_count,
+                "fail": fail_count,
+                "warn": warn_count,
+                "rows": rows,
+            })
+            progress.progress((i + 1) / len(arxml_files))
+        progress.empty()
+        st.session_state["_system_analysis"] = results_per_file
+    data = st.session_state.get("_system_analysis")
+    if data:
+        # Compact summary table instead of many repeated lines
+        st.markdown("**Summary**")
+        summary_rows = [
+            {
+                "File": row["file"],
+                "PASS": row["pass"],
+                "FAIL": row["fail"],
+                "WARN": row["warn"],
+            }
+            for row in data
+        ]
+        st.table(summary_rows)
+        st.markdown("---")
+        st.markdown("**Per-file details (only files with issues)**")
+        for row in data:
+            if row["fail"] == 0 and row["warn"] == 0:
+                continue
+            label = f"{row['file']} (✔ {row['pass']} / ❌ {row['fail']} / ⚠ {row['warn']})"
+            with st.expander(label):
+                for r in row["rows"]:
+                    status = r.get("status", "")
+                    sym = "✔" if status == "PASS" else ("❌" if status == "FAIL" else "⚠")
+                    st.caption(f"{sym} {r.get('name', '')}: {r.get('summary', '')}")
+
+
 PENDING_FEATURE_KEY = "_pending_sidebar_feature"
 
 
@@ -364,9 +725,16 @@ def main():
         st.session_state["sidebar_feature"] = st.session_state.pop(PENDING_FEATURE_KEY)
 
     inject_theme()
-    st.title("AUTOSAR ARXML Validator & AI Agent")
+    st.title("ARXForge")
 
-    menu = ["AI Agent", "ARXML Validator", "Upload & View ARXML", "Compare ARXML"]
+    menu = [
+        "AI Agent",
+        "ARXML Validator",
+        "Upload & View ARXML",
+        "Compare ARXML",
+        "Architecture Graph",
+        "System Analysis",
+    ]
     st.sidebar.markdown("**Features**")
     choice = st.sidebar.radio("Select feature", menu, key="sidebar_feature", label_visibility="collapsed")
 
@@ -394,21 +762,73 @@ def main():
     elif choice == "Compare ARXML":
         compare_arxml_interface(upload_dir=UPLOAD_FOLDER)
 
+    elif choice == "Architecture Graph":
+        architecture_graph_interface(upload_dir=UPLOAD_FOLDER)
+
+    elif choice == "System Analysis":
+        system_analysis_interface(upload_dir=UPLOAD_FOLDER)
+
     elif choice == "ARXML Validator":
         st.subheader("ARXML File Validation")
-        uploaded_file = st.file_uploader("Upload ARXML File for Validation", type=None)
+        xsd_schema_path = os.path.join(os.path.dirname(__file__), "..", "AUTOSAR_schema.xsd")
+
+        # Validation Dashboard: select file from uploads and run all validators
+        try:
+            arxml_files = sorted(f for f in os.listdir(UPLOAD_FOLDER) if is_arxml_only(f))
+        except FileNotFoundError:
+            arxml_files = []
+        if arxml_files:
+            st.markdown("**Validation Dashboard**")
+            dash_file = st.selectbox(
+                "Select ARXML file",
+                arxml_files,
+                key="validator_dashboard_file",
+                label_visibility="collapsed",
+            )
+            _dash_result_key = "_validation_dashboard_result"
+            _dash_file_key = "_validation_dashboard_file"
+            if st.button("Run full validation", key="validator_dashboard_btn"):
+                path = os.path.join(UPLOAD_FOLDER, dash_file)
+                with st.spinner("Running validators..."):
+                    dashboard_results = run_audit_validators(path, xsd_schema_path)
+                st.session_state[_dash_result_key] = dashboard_results
+                st.session_state[_dash_file_key] = dash_file
+            dashboard_results = st.session_state.get(_dash_result_key)
+            dash_file_used = st.session_state.get(_dash_file_key)
+            if dashboard_results and dash_file_used == dash_file:
+                if dashboard_results[0].get("name") in ("File", "Parse") and dashboard_results[0].get("status") == "FAIL":
+                    st.error(dashboard_results[0].get("summary", "Error"))
+                else:
+                    pass_count = sum(1 for r in dashboard_results if r.get("status") == "PASS")
+                    fail_count = sum(1 for r in dashboard_results if r.get("status") == "FAIL")
+                    warn_count = sum(1 for r in dashboard_results if r.get("status") == "WARNING")
+                    st.caption(f"✔ {pass_count} passed  |  ❌ {fail_count} failed  |  ⚠ {warn_count} warning(s)")
+                    cols = st.columns(3)
+                    for i, r in enumerate(dashboard_results):
+                        with cols[i % 3]:
+                            status = r.get("status", "")
+                            icon = "✔" if status == "PASS" else ("❌" if status == "FAIL" else "⚠")
+                            st.markdown(f"**{icon} {r.get('name', '')}**")
+                            st.caption(r.get("summary", ""))
+        else:
+            st.info("Upload ARXML files in AI Agent or Upload & View first to use the Validation Dashboard.")
+
+        st.markdown("---")
+        st.markdown("**Schema-only validation (upload)**")
+        uploaded_file = st.file_uploader("Upload ARXML File for Validation", type=None, key="validator_upload")
         if uploaded_file:
-            if not is_arxml_only(uploaded_file.name):
-                st.error("Invalid file type. Only .arxml files are accepted.")
+            safe_name = safe_upload_filename(uploaded_file.name)
+            if not safe_name:
+                st.error("Invalid file type or filename. Only .arxml files with a safe name are accepted.")
+            elif len(uploaded_file.getbuffer()) > MAX_UPLOAD_BYTES:
+                st.error(f"File too large. Maximum size is {MAX_UPLOAD_BYTES // (1024*1024)} MB.")
             else:
-                file_path = os.path.join(UPLOAD_FOLDER, uploaded_file.name)
+                file_path = os.path.join(UPLOAD_FOLDER, safe_name)
                 try:
                     with open(file_path, "wb") as f:
                         f.write(uploaded_file.getbuffer())
-                    st.success(f"File uploaded: {uploaded_file.name}")
+                    st.success(f"File uploaded: {safe_name}")
 
-                    xsd_schema_path = os.path.join(os.path.dirname(__file__), "..", "AUTOSAR_schema.xsd")
-                
                     if not os.path.exists(xsd_schema_path):
                         st.error(f"XSD schema file not found at: {xsd_schema_path}")
                     else:
@@ -430,14 +850,17 @@ def main():
         st.subheader("Upload ARXML File")
         uploaded_file = st.file_uploader("Upload ARXML File", type=None)
         if uploaded_file:
-            if not is_arxml_only(uploaded_file.name):
-                st.error("Invalid file type. Only .arxml files are accepted.")
+            safe_name = safe_upload_filename(uploaded_file.name)
+            if not safe_name:
+                st.error("Invalid file type or filename. Only .arxml files with a safe name are accepted.")
+            elif len(uploaded_file.getbuffer()) > MAX_UPLOAD_BYTES:
+                st.error(f"File too large. Maximum size is {MAX_UPLOAD_BYTES // (1024*1024)} MB.")
             else:
-                file_path = os.path.join(UPLOAD_FOLDER, uploaded_file.name)
+                file_path = os.path.join(UPLOAD_FOLDER, safe_name)
                 try:
                     with open(file_path, "wb") as f:
                         f.write(uploaded_file.getbuffer())
-                    st.success(f"File uploaded: {uploaded_file.name}")
+                    st.success(f"File uploaded: {safe_name}")
                 except Exception as e:
                     st.error(f"Error saving file: {str(e)}")
 

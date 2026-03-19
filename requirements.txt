@@ -17,6 +17,9 @@ groq
 sentence-transformers
 faiss-cpu
 
+# Graph visualization (Architecture Graph)
+pyvis
+
 # Data Processing
 numpy
 pandas

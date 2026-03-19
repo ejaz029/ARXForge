@@ -242,17 +242,8 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module="tensorflo
 warnings.filterwarnings("ignore", message=".*tf.losses.*deprecated.*")
 warnings.filterwarnings("ignore", message=".*sparse_softmax_cross_entropy.*deprecated.*")
 
-# Use langchain_huggingface for HuggingFaceEmbeddings (non-deprecated)
-try:
-    from langchain_huggingface import HuggingFaceEmbeddings
-    # Suppress the deprecation warning if it still appears
-    warnings.filterwarnings("ignore", message=".*HuggingFaceEmbeddings.*deprecated.*")
-except ImportError:
-    # Fallback for older versions
-    from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.chains import RetrievalQA
+# RAG embeddings/vectorstore/QA are imported lazily in _run_rag_qa to avoid
+# breaking app startup when langchain_community/langchain_core/pydantic versions conflict.
 from config.llm_config import get_llm
 from config.device_utils import get_device, get_device_name
 from validators.extract_ports import extract_ports_from_arxml
@@ -380,6 +371,21 @@ def _load_arxml_context(upload_folder, selected_file, user_query):
 
 def _run_rag_qa(user_query, arxml_data, loaded_files, target_file):
     """Run RAG-based QA over loaded ARXML context. Used by process_rag_only."""
+    try:
+        try:
+            from langchain_huggingface import HuggingFaceEmbeddings
+        except ImportError:
+            from langchain_community.embeddings import HuggingFaceEmbeddings
+        from langchain_community.vectorstores import FAISS
+        from langchain.text_splitter import RecursiveCharacterTextSplitter
+        from langchain.chains import RetrievalQA
+    except Exception as e:
+        return (
+            "RAG is unavailable: required packages could not be loaded. "
+            "Use the AI Agent for validation and extraction; it does not require embeddings. "
+            f"Error: {e}"
+        )
+
     if target_file:
         context_text = arxml_data.get(target_file, "")
         if context_text.startswith("⚠️"):

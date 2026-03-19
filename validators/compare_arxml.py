@@ -232,6 +232,177 @@ def _build_dependency_map(
     return out
 
 
+def _path_to_swc_display_name(path: str, index: dict[str, Tuple[str, str, _Sig]]) -> str:
+    """
+    Return a display name for the component at path: prefer COMPONENT-PROTOTYPE SHORT-NAME
+    from index, else last path segment.
+    """
+    if not path or path == "/":
+        return ""
+    path_norm = _normalize_path(path)
+    if path_norm in index:
+        tag = index[path_norm][0]
+        short_name = index[path_norm][1]
+        if tag == "COMPONENT-PROTOTYPE":
+            return short_name
+    # Fallback: last segment
+    segment = path_norm.strip("/").split("/")[-1] if path_norm else ""
+    return segment or ""
+
+
+def _affected_components_to_swc_names(
+    affected_paths: list[str],
+    index: dict[str, Tuple[str, str, _Sig]],
+) -> list[str]:
+    """Convert affected_components paths to deduplicated, ordered list of SWC display names."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for p in affected_paths:
+        name = _path_to_swc_display_name(p, index)
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def _extract_port_short_name_from_ref(elem: ET.Element) -> str | None:
+    """From a PROVIDER-IREF or REQUESTER-IREF element, extract the port prototype short name (last segment of ref)."""
+    if elem is None:
+        return None
+    # Direct text content (path)
+    text = (elem.text or "").strip()
+    if not text:
+        for child in elem:
+            if _tag_local(child) in (
+                "TARGET-P-PORT-REF",
+                "TARGET-R-PORT-REF",
+                "TARGET-P-PORT-PROTOTYPE-REF",
+                "TARGET-R-PORT-PROTOTYPE-REF",
+            ):
+                text = (child.text or "").strip()
+                break
+            t = (child.text or "").strip()
+            if t:
+                text = t
+                break
+    if not text:
+        return None
+    # Last segment of path
+    segment = text.split("/")[-1].strip() if "/" in text else text
+    return segment or None
+
+
+def _build_connector_map(root: ET.Element) -> dict[str, int]:
+    """
+    Count ASSEMBLY-SW-CONNECTOR references per port short name.
+    Returns port_short_name -> number of connectors that reference it.
+    """
+    port_counts: dict[str, int] = {}
+    for elem in root.iter():
+        if _tag_local(elem) != "ASSEMBLY-SW-CONNECTOR":
+            continue
+        for child in elem:
+            tag = _tag_local(child)
+            if tag in ("PROVIDER-IREF", "REQUESTER-IREF"):
+                name = _extract_port_short_name_from_ref(child)
+                if name:
+                    port_counts[name] = port_counts.get(name, 0) + 1
+    return port_counts
+
+
+def _classify_impact_severity(rte_mappings: dict[str, int]) -> str:
+    """Classify impact severity from RTE connector counts: 0=LOW, 1-3=MEDIUM, >3=HIGH."""
+    total = (rte_mappings.get("file_a") or 0) + (rte_mappings.get("file_b") or 0)
+    if total == 0:
+        return "LOW"
+    if total <= 3:
+        return "MEDIUM"
+    return "HIGH"
+
+
+def _impact_score(
+    connectors: int,
+    affected_swc_count: int,
+    interface_changes: int,
+) -> int:
+    """
+    Compute 0-10 impact score: connectors*2 + affected_swcs*2 + interface_changes*1, capped at 10.
+    """
+    raw = (connectors * 2) + (affected_swc_count * 2) + (interface_changes * 1)
+    return min(10, max(0, raw))
+
+
+def _build_interface_signals_map(root: ET.Element) -> dict[str, list[str]]:
+    """
+    For each SENDER-RECEIVER-INTERFACE and CLIENT-SERVER-INTERFACE, collect SHORT-NAME of
+    VARIABLE-DATA-PROTOTYPE children. Returns interface_short_name -> [signal short names].
+    """
+    out: dict[str, list[str]] = {}
+    for elem in root.iter():
+        tag = _tag_local(elem)
+        if tag not in ("SENDER-RECEIVER-INTERFACE", "CLIENT-SERVER-INTERFACE"):
+            continue
+        iface_name = _child_text_local(elem, "SHORT-NAME")
+        if not iface_name:
+            continue
+        signals: list[str] = []
+        for child in elem:
+            if _tag_local(child) == "VARIABLE-DATA-PROTOTYPE":
+                sn = _child_text_local(child, "SHORT-NAME")
+                if sn:
+                    signals.append(sn)
+        out[iface_name] = signals
+    return out
+
+
+def _build_port_to_interface_map(root: ET.Element) -> dict[str, str]:
+    """
+    For each P-PORT-PROTOTYPE and R-PORT-PROTOTYPE, map port short name to interface short name
+    (last segment of PROVIDED-INTERFACE-TREF / REQUIRED-INTERFACE-TREF).
+    """
+    out: dict[str, str] = {}
+    for elem in root.iter():
+        tag = _tag_local(elem)
+        if tag not in ("P-PORT-PROTOTYPE", "R-PORT-PROTOTYPE"):
+            continue
+        port_name = _child_text_local(elem, "SHORT-NAME")
+        if not port_name:
+            continue
+        ref = (
+            _child_text_local(elem, "PROVIDED-INTERFACE-TREF")
+            or _child_text_local(elem, "REQUIRED-INTERFACE-TREF")
+            or ""
+        )
+        if not ref:
+            continue
+        segment = ref.strip("/").split("/")[-1] if "/" in ref else ref.strip()
+        if segment:
+            out[port_name] = segment
+    return out
+
+
+def _get_affected_signals_and_interfaces(
+    item_type: str,
+    short_name: str,
+    interface_signals: dict[str, list[str]],
+    port_to_interface: dict[str, str],
+) -> tuple[list[str], list[str]]:
+    """
+    Return (affected_signals, affected_interfaces) for a changed port or interface.
+    """
+    affected_signals: list[str] = []
+    affected_interfaces: list[str] = []
+    if item_type in ("SENDER-RECEIVER-INTERFACE", "CLIENT-SERVER-INTERFACE"):
+        affected_interfaces = [short_name] if short_name else []
+        affected_signals = list(interface_signals.get(short_name, [])[:20])
+    elif item_type in ("P-PORT-PROTOTYPE", "R-PORT-PROTOTYPE"):
+        iface = port_to_interface.get(short_name, "")
+        if iface:
+            affected_interfaces = [iface]
+            affected_signals = list(interface_signals.get(iface, [])[:20])
+    return (affected_signals, affected_interfaces)
+
+
 def compare_two_arxml_files(path_a: str, path_b: str) -> dict[str, Any]:
     """
     Compare two ARXML files. Returns a structured dict for the UI.
@@ -573,35 +744,102 @@ def compare_two_arxml_files(path_a: str, path_b: str) -> dict[str, Any]:
         "examples": severity_examples,
     }
 
-    # Dependency impact: for each changed port/interface, list affected component paths (change traceability)
+    # Connector maps: port short name -> connector count (once per file)
+    connector_map_a = _build_connector_map(root_a)
+    connector_map_b = _build_connector_map(root_b)
+
+    # Impact propagation: interface -> signals, port -> interface (per file)
+    interface_signals_a = _build_interface_signals_map(root_a)
+    interface_signals_b = _build_interface_signals_map(root_b)
+    port_to_interface_a = _build_port_to_interface_map(root_a)
+    port_to_interface_b = _build_port_to_interface_map(root_b)
+
+    # Dependency impact: for each changed port/interface, list affected component paths and SWC names
     dep_a = _build_dependency_map(index_a)
     dep_b = _build_dependency_map(index_b)
     dependency_impact: list[dict[str, Any]] = []
     for item in removed_list:
         if item["type"] in INTERFACE_OR_PORT_TAGS:
-            affected = dep_a.get(item["short_name"], [])
-            dependency_impact.append({
+            affected = dep_a.get(item["short_name"], [])[:10]
+            rte_mappings = {"file_a": connector_map_a.get(item["short_name"], 0), "file_b": 0}
+            total_conn = (rte_mappings.get("file_a") or 0) + (rte_mappings.get("file_b") or 0)
+            sigs, ifaces = _get_affected_signals_and_interfaces(
+                item["type"], item["short_name"],
+                interface_signals_a, port_to_interface_a,
+            )
+            swc_names = _affected_components_to_swc_names(affected, index_a)
+            entry = {
                 "element": item["short_name"],
                 "change": "removed",
-                "affected_components": affected[:10],
-            })
+                "affected_components": affected,
+                "affected_swc_names": swc_names,
+                "rte_mappings": rte_mappings,
+                "impact_severity": _classify_impact_severity(rte_mappings),
+                "affected_signals": sigs,
+                "affected_interfaces": ifaces,
+                "connector_summary": f"{total_conn} assembly connector{'s' if total_conn != 1 else ''}",
+                "impact_score": _impact_score(total_conn, len(swc_names), 1),
+            }
+            dependency_impact.append(entry)
     for item in added_list:
         if item["type"] in INTERFACE_OR_PORT_TAGS:
-            affected = dep_b.get(item["short_name"], [])
-            dependency_impact.append({
+            affected = dep_b.get(item["short_name"], [])[:10]
+            rte_mappings = {"file_a": 0, "file_b": connector_map_b.get(item["short_name"], 0)}
+            total_conn = (rte_mappings.get("file_a") or 0) + (rte_mappings.get("file_b") or 0)
+            sigs, ifaces = _get_affected_signals_and_interfaces(
+                item["type"], item["short_name"],
+                interface_signals_b, port_to_interface_b,
+            )
+            swc_names = _affected_components_to_swc_names(affected, index_b)
+            entry = {
                 "element": item["short_name"],
                 "change": "added",
-                "affected_components": affected[:10],
-            })
+                "affected_components": affected,
+                "affected_swc_names": swc_names,
+                "rte_mappings": rte_mappings,
+                "impact_severity": _classify_impact_severity(rte_mappings),
+                "affected_signals": sigs,
+                "affected_interfaces": ifaces,
+                "connector_summary": f"{total_conn} assembly connector{'s' if total_conn != 1 else ''}",
+                "impact_score": _impact_score(total_conn, len(swc_names), 1),
+            }
+            dependency_impact.append(entry)
     for item in renamed_list:
         if item["type"] in INTERFACE_OR_PORT_TAGS:
             affected_a = dep_a.get(item["short_name_a"], [])
             affected_b = dep_b.get(item["short_name_b"], [])
-            dependency_impact.append({
+            affected_merged = list(dict.fromkeys(affected_a + affected_b))[:10]
+            rte_mappings = {
+                "file_a": connector_map_a.get(item["short_name_a"], 0),
+                "file_b": connector_map_b.get(item["short_name_b"], 0),
+            }
+            total_conn = (rte_mappings.get("file_a") or 0) + (rte_mappings.get("file_b") or 0)
+            swc_names_a = _affected_components_to_swc_names(affected_a, index_a)
+            swc_names_b = _affected_components_to_swc_names(affected_b, index_b)
+            affected_swc_names = list(dict.fromkeys(swc_names_a + swc_names_b))
+            sigs_a, ifaces_a = _get_affected_signals_and_interfaces(
+                item["type"], item["short_name_a"],
+                interface_signals_a, port_to_interface_a,
+            )
+            sigs_b, ifaces_b = _get_affected_signals_and_interfaces(
+                item["type"], item["short_name_b"],
+                interface_signals_b, port_to_interface_b,
+            )
+            affected_signals = list(dict.fromkeys(sigs_a + sigs_b))
+            affected_interfaces = list(dict.fromkeys(ifaces_a + ifaces_b))
+            entry = {
                 "element": f"{item['short_name_a']} -> {item['short_name_b']}",
                 "change": "renamed",
-                "affected_components": list(dict.fromkeys(affected_a + affected_b))[:10],
-            })
+                "affected_components": affected_merged,
+                "affected_swc_names": affected_swc_names,
+                "rte_mappings": rte_mappings,
+                "impact_severity": _classify_impact_severity(rte_mappings),
+                "affected_signals": affected_signals,
+                "affected_interfaces": affected_interfaces,
+                "connector_summary": f"{total_conn} assembly connector{'s' if total_conn != 1 else ''}",
+                "impact_score": _impact_score(total_conn, len(affected_swc_names), max(1, len(affected_interfaces))),
+            }
+            dependency_impact.append(entry)
     result["dependency_impact"] = dependency_impact
 
     # Summary counts + basic impact-style numbers

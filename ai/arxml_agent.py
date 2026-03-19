@@ -531,6 +531,38 @@ Execution Plan:
                 + "\n"
             )
 
+        # When user asked to show/list UUIDs and extract_uuids found none, force a clear answer and prevent "duplicates found, list empty" confusion.
+        query_lower = (user_query or "").lower()
+        show_uuids_requested = any(
+            phrase in query_lower for phrase in (
+                "show all uuids", "list uuids", "list all uuids", "show uuids",
+                "extract uuids", "get uuids", "what uuids", "which uuids"
+            )
+        )
+        if show_uuids_requested:
+            extract_uuids_result = ""
+            duplicate_uuids_says_no_duplicates = False
+            for r in tool_results:
+                tname = r.get("tool_name", "")
+                text = (r.get("result") or "")
+                if tname == "extract_uuids_tool":
+                    extract_uuids_result = text
+                if tname == "check_duplicate_uuids_tool" and "No duplicate UUIDs found" in text:
+                    duplicate_uuids_says_no_duplicates = True
+            no_uuids_in_file = (
+                "no elements with uuid" in extract_uuids_result.lower()
+                or "no elements with a uuid" in extract_uuids_result.lower()
+            )
+            if no_uuids_in_file or duplicate_uuids_says_no_duplicates:
+                summary_content += (
+                    "\nSHOW-UUID REQUEST RULES (follow strictly):\n"
+                    "- The user asked to show or list UUIDs. If extract_uuids_tool reported 'No elements with UUID' (or similar), "
+                    "your answer must state clearly: there are no UUIDs in this file / no UUIDs to show.\n"
+                    "- When check_duplicate_uuids_tool output contains 'No duplicate UUIDs found', you must NOT write "
+                    "'Duplicate UUIDs were found' or 'duplicate UUIDs ... empty list' or 'list of duplicate UUIDs is empty ([])'. "
+                    "That would contradict the tool. Write that no duplicate UUIDs were found (or that there are no UUIDs in the file).\n"
+                )
+
         if selected_file:
             summary_content += f"\nNote: Analysis was performed on file '{selected_file}'.\n"
         # REPORT MAPPING RULES (how to use FACTUAL RESULTS in sections):
@@ -703,7 +735,9 @@ Execution Plan:
                 "when it reported no duplicates or passed.\n"
                 "- Do NOT recommend 'review duplicate UUIDs' or 'fix duplicate UUIDs' when check_duplicate_uuids_tool "
                 "reported 'No duplicate UUIDs found'. Only recommend fixes for actual failures (e.g. version, BSW modules).\n"
-                "- When duplicate_ports_tool reports 'No duplicate ports found', that is a pass; do not list it under Failures."
+                "- When duplicate_ports_tool reports 'No duplicate ports found', that is a pass; do not list it under Failures.\n"
+                "- When check_duplicate_uuids_tool output contains 'No duplicate UUIDs found', never write 'Duplicate UUIDs were found' or "
+                "'duplicate UUIDs ... empty list' or 'list of duplicate UUIDs is empty ([])'. State that no duplicate UUIDs were found."
             )
         summary_content += "\nProvide a clear, comprehensive answer to the user's query based on these results."
         
