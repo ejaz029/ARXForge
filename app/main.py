@@ -75,11 +75,27 @@
 import os
 import sys
 import warnings
+import json
+import urllib.request
+import urllib.error
 import xml.etree.ElementTree as ET
 import xml.dom.minidom
 
 # Load environment variables FIRST before any other imports
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    _exe = sys.executable.replace("\\", "/")
+    sys.exit(
+        "Missing dependency: python-dotenv.\n\n"
+        f"This process is using:\n  {_exe}\n\n"
+        "If your prompt shows (venv) but the path is not …/ARXForge/venv/Scripts/python.exe, "
+        "the `streamlit` entry on PATH is from another Python. Run:\n"
+        "  python -m streamlit run app/main.py\n"
+        "or .\\venv\\Scripts\\python.exe -m streamlit run app/main.py\n\n"
+        "Then install deps in the same interpreter:\n"
+        f"  \"{sys.executable}\" -m pip install -r requirements.txt\n"
+    )
 load_dotenv()  # Load .env file
 
 # Suppress all warnings before importing streamlit
@@ -130,38 +146,121 @@ warnings.filterwarnings("ignore", message=".*oneDNN.*")
 warnings.filterwarnings("ignore", message=".*unauthenticated.*HF.*")
 warnings.filterwarnings("ignore", message=".*HF_TOKEN.*")
 
-# Suppress TensorFlow warnings after import
-try:
-    import tensorflow as tf
-    tf.get_logger().setLevel('ERROR')
-    # Disable TensorFlow deprecation warnings
-    tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
-except ImportError:
-    pass
+# region agent log
+_ARX_DEBUG_LOG = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".cursor", "debug.log"))
+
+
+def _arx_debug_log(hypothesis_id: str, message: str, **extra: object) -> None:
+    try:
+        import json
+        import time
+
+        payload = {
+            "hypothesisId": hypothesis_id,
+            "message": message,
+            "timestamp": int(time.time() * 1000),
+            "data": extra,
+        }
+        with open(_ARX_DEBUG_LOG, "a", encoding="utf-8") as df:
+            df.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+# endregion
 
 # ✅ Set page config
 st.set_page_config(page_title="ARXForge — AUTOSAR ARXML Validator & AI Agent", layout="wide")
+# region agent log
+_arx_debug_log("H1", "after_set_page_config")
+# endregion
 
 # ✅ Fix import path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-# ✅ Imports
-from ai import ai_chatbot as _ai_chatbot
-from ai.ai_chatbot import chatbot_interface, AGENT_LAST_RUN_KEY, AGENT_CHAT_HISTORY_KEY
-inject_theme = getattr(_ai_chatbot, "inject_theme", lambda: None)
+# ✅ Imports (keep heavy LangChain / agent stack out of module import — loads inside main())
 from app.file_utils import load_arxml_folder, is_arxml_only, safe_upload_filename, MAX_UPLOAD_BYTES
-from validators.schema_validation import validate_arxml_schema
-from validators.data_consistency import validate_data
-from validators.compare_arxml import compare_two_arxml_files
-from validators.audit_runner import run_audit_validators
-from validators.arxml_graph import build_arxml_graph
-from ai.compare_report import summarize_comparison_with_llm
+from engine.services import run_compare, run_full_audit, run_graph
 from app.graph_visualization import render_arxml_graph_pyvis
 import streamlit.components.v1 as components
+
+# Populated on first main() run (globals so helpers defined below resolve correctly)
+inject_theme = lambda: None
+chatbot_interface = None
+AGENT_LAST_RUN_KEY = "agent_last_run"
+AGENT_CHAT_HISTORY_KEY = "agent_chat_history"
+summarize_comparison_with_llm = None
+
+
+def _import_agent_stack() -> None:
+    """Import LangChain / Groq / RAG stack; assign module globals for helpers below."""
+    global inject_theme, chatbot_interface, AGENT_LAST_RUN_KEY, AGENT_CHAT_HISTORY_KEY, summarize_comparison_with_llm
+    from ai import ai_chatbot as _ai_chatbot
+    from ai.ai_chatbot import chatbot_interface as _ci, AGENT_LAST_RUN_KEY as _lk, AGENT_CHAT_HISTORY_KEY as _hk
+    from ai.compare_report import summarize_comparison_with_llm as _sum
+
+    chatbot_interface = _ci
+    AGENT_LAST_RUN_KEY = _lk
+    AGENT_CHAT_HISTORY_KEY = _hk
+    summarize_comparison_with_llm = _sum
+    inject_theme = getattr(_ai_chatbot, "inject_theme", lambda: None)
 
 # ✅ Uploads folder
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "..", "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+USE_API_BACKEND = os.getenv("ARXFORGE_USE_API_BACKEND", "false").lower() in ("1", "true", "yes")
+API_BASE_URL = os.getenv("ARXFORGE_API_BASE_URL", "http://127.0.0.1:8000")
+
+# region agent log
+_arx_debug_log("H6", "module_bootstrap_complete")
+# endregion
+
+
+def _post_api(path: str, payload: dict):
+    req = urllib.request.Request(
+        f"{API_BASE_URL}{path}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+        return data.get("result")
+
+
+def _compare_dispatch(path_a: str, path_b: str):
+    if USE_API_BACKEND:
+        try:
+            return _post_api("/compare", {"file_a": path_a, "file_b": path_b})
+        except urllib.error.HTTPError as e:
+            return {"error": f"API compare failed ({e.code}): {e.reason}"}
+        except Exception as e:
+            return {"error": f"API compare failed: {e}"}
+    return run_compare(path_a, path_b)
+
+
+def _graph_dispatch(path: str):
+    if USE_API_BACKEND:
+        try:
+            out = _post_api("/graph", {"file_path": path}) or {}
+            return out.get("graph"), out.get("error")
+        except urllib.error.HTTPError as e:
+            return None, f"API graph failed ({e.code}): {e.reason}"
+        except Exception as e:
+            return None, f"API graph failed: {e}"
+    out = run_graph(path)
+    return out.get("graph"), out.get("error")
+
+
+def _audit_dispatch(path: str, xsd_path: str | None = None):
+    if USE_API_BACKEND:
+        try:
+            return _post_api("/audit", {"file_path": path, "xsd_path": xsd_path})
+        except urllib.error.HTTPError as e:
+            return [{"name": "API", "status": "FAIL", "summary": f"Audit API failed ({e.code}): {e.reason}"}]
+        except Exception as e:
+            return [{"name": "API", "status": "FAIL", "summary": f"Audit API failed: {e}"}]
+    return run_full_audit(path, xsd_path)
 
 def pretty_print_xml(root):
     """Returns pretty-printed XML string from ElementTree root."""
@@ -209,7 +308,7 @@ def compare_arxml_interface(upload_dir):
         path_b = os.path.join(upload_dir, file_b)
         with st.spinner("Comparing..."):
             try:
-                out = compare_two_arxml_files(path_a, path_b)
+                out = _compare_dispatch(path_a, path_b)
             except Exception as e:
                 st.error(f"Comparison failed: {e}")
                 return
@@ -464,7 +563,7 @@ def architecture_graph_interface(upload_dir):
     path = os.path.join(upload_dir, graph_file)
     if st.button("Build graph", key="build_graph_btn"):
         with st.spinner("Building graph..."):
-            graph, err = build_arxml_graph(path)
+            graph, err = _graph_dispatch(path)
         if err:
             st.error(err)
             return
@@ -676,7 +775,7 @@ def system_analysis_interface(upload_dir):
         results_per_file = []
         for i, f in enumerate(arxml_files):
             path = os.path.join(upload_dir, f)
-            rows = run_audit_validators(path, xsd_path)
+            rows = _audit_dispatch(path, xsd_path)
             pass_count = sum(1 for r in rows if r.get("status") == "PASS")
             fail_count = sum(1 for r in rows if r.get("status") == "FAIL")
             warn_count = sum(1 for r in rows if r.get("status") == "WARNING")
@@ -721,10 +820,31 @@ PENDING_FEATURE_KEY = "_pending_sidebar_feature"
 
 
 def main():
+    # region agent log
+    _arx_debug_log("H2", "main_entry")
+    # endregion
+    st.caption("Starting ARXForge…")
+
     if PENDING_FEATURE_KEY in st.session_state:
         st.session_state["sidebar_feature"] = st.session_state.pop(PENDING_FEATURE_KEY)
 
+    if not st.session_state.get("_arx_agent_imported"):
+        # region agent log
+        _arx_debug_log("H3", "before_import_agent_stack")
+        # endregion
+        with st.spinner("Loading ARXForge (AI libraries — first run can take a minute)…"):
+            _import_agent_stack()
+        # region agent log
+        _arx_debug_log("H4", "after_import_agent_stack")
+        # endregion
+        st.session_state["_arx_agent_imported"] = True
+    else:
+        _import_agent_stack()
+
     inject_theme()
+    # region agent log
+    _arx_debug_log("H5", "after_inject_theme")
+    # endregion
     st.title("ARXForge")
 
     menu = [
@@ -790,7 +910,7 @@ def main():
             if st.button("Run full validation", key="validator_dashboard_btn"):
                 path = os.path.join(UPLOAD_FOLDER, dash_file)
                 with st.spinner("Running validators..."):
-                    dashboard_results = run_audit_validators(path, xsd_schema_path)
+                    dashboard_results = _audit_dispatch(path, xsd_schema_path)
                 st.session_state[_dash_result_key] = dashboard_results
                 st.session_state[_dash_file_key] = dash_file
             dashboard_results = st.session_state.get(_dash_result_key)
@@ -833,7 +953,9 @@ def main():
                         st.error(f"XSD schema file not found at: {xsd_schema_path}")
                     else:
                         try:
-                            is_valid, validation_errors = validate_arxml_schema(file_path, xsd_schema_path)
+                            from validators.schema_validation import validate_arxml_schema as _validate_schema
+
+                            is_valid, validation_errors = _validate_schema(file_path, xsd_schema_path)
 
                             if not is_valid:
                                 st.error("Schema Validation Failed:")
@@ -887,5 +1009,5 @@ def main():
         except Exception as e:
             st.error(f"Error loading ARXML files: {str(e)}")
 
-if __name__ == "__main__":
-    main()
+# Streamlit executes this script as a module; do not gate on __name__ or the UI never mounts.
+main()

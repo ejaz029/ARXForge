@@ -143,9 +143,55 @@ def validate_arxml_schema(arxml_file, xsd_file):
             is_valid = schema.validate(arxml_doc)
             if not is_valid:
                 errors = schema.error_log
-                error_messages = [f"❌ Line {error.line}: {error.message}" for error in errors]
+                # region agent log
+                _dbg_path = os.path.abspath(
+                    os.path.join(os.path.dirname(__file__), "..", ".cursor", "debug.log")
+                )
+                try:
+                    import json
+                    import time as _time
+
+                    for _i, _err in enumerate(errors):
+                        _payload = {
+                            "id": f"schema_val_{int(_time.time() * 1000)}",
+                            "timestamp": int(_time.time() * 1000),
+                            "hypothesisId": "H1",
+                            "location": "validators/schema_validation.py:validate",
+                            "message": "xsd_validation_failed",
+                            "data": {
+                                "arxml_file": os.path.basename(arxml_file),
+                                "index": _i,
+                                "line": _err.line,
+                                "column": _err.column,
+                                "domain": getattr(_err, "domain_name", None) or str(_err.domain),
+                                "type_name": getattr(_err, "type_name", None),
+                                "message": _err.message,
+                            },
+                        }
+                        with open(_dbg_path, "a", encoding="utf-8") as _df:
+                            _df.write(json.dumps(_payload, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
+                # endregion
+
+                def _format_schema_error(err) -> str:
+                    base = f"❌ Line {err.line}: {err.message}"
+                    msg = err.message or ""
+                    if (
+                        "CATEGORY" in msg
+                        and "pattern" in msg.lower()
+                        and ("''" in msg or '""' in msg or "empty" in msg.lower())
+                    ):
+                        base += (
+                            "\n   → Fix: CATEGORY must be a non-empty AUTOSAR identifier "
+                            "(letters, digits, underscore; starts with a letter), e.g. STANDARD. "
+                            "Remove the empty element or set a valid value at this line."
+                        )
+                    return base
+
+                error_messages = [_format_schema_error(error) for error in errors]
                 return False, error_messages
-                
+
             return True, None
             
         finally:

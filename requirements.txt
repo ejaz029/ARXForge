@@ -32,7 +32,7 @@ pytest-timeout>=2.0.0
 
 python-dotenv
 
-
-
-
+# Use Python 3.11.x for this project (LangChain / Pydantic v1 are not compatible with Python 3.14+).
+# Create the venv with: py -3.11 -m venv venv
+# Verify: .\venv\Scripts\python.exe -c "import sys; print(sys.version)"
 

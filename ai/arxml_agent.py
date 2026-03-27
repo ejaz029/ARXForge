@@ -18,9 +18,78 @@ from ai.intent_router import classify_intent, get_recommended_tools, should_use_
 
 # Max tool execution loops (plan → tools → decide_next → tools → ...)
 MAX_ITERATIONS = 5
+ENGINE_VERSION = "1.0.0"
+RESULT_SCHEMA_VERSION = "1.0.0"
 
 # Shared checkpointer so conversation memory persists across requests (same process).
 _shared_checkpointer = None
+
+
+_VALIDATION_COVERAGE_TOOLS = [
+    ("validate_schema_tool", "Schema"),
+    ("validate_data_consistency_tool", "Data consistency"),
+    ("validate_port_references_tool", "Port references"),
+    ("validate_component_refs_tool", "Component references"),
+    ("validate_communication_tool", "Communication"),
+    ("validate_rte_tool", "RTE"),
+    ("validate_memory_tool", "Memory"),
+    ("validate_diagnostics_tool", "Diagnostics"),
+    ("validate_ecu_bsw_tool", "ECU/BSW"),
+    ("validate_version_compatibility_tool", "Version compatibility"),
+]
+
+
+def _first_meaningful_line(text: str) -> str:
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:180]
+    return "No details provided."
+
+
+def _infer_tool_status(tool_result: dict) -> tuple[str, str]:
+    """Infer PASS/FAIL/WARNING with short reason from tool output."""
+    text = str(tool_result.get("result") or "")
+    if tool_result.get("error"):
+        return ("FAIL", _first_meaningful_line(text))
+    lower = text.lower()
+    fail_markers = ("❌", "failed", "issues found", "not found", "missing", "broken", "unsupported", "error:")
+    warn_markers = ("⚠", "warning")
+    pass_markers = ("✅", "passed", "all valid", "no issues", "supported")
+    if any(m in text for m in ("❌", "⚠")) or any(m in lower for m in fail_markers[1:] + warn_markers):
+        if "⚠" in text or any(m in lower for m in warn_markers):
+            return ("WARNING", _first_meaningful_line(text))
+        return ("FAIL", _first_meaningful_line(text))
+    if any(m in text for m in ("✅",)) or any(m in lower for m in pass_markers[1:]):
+        return ("PASS", _first_meaningful_line(text))
+    return ("PASS", "Executed successfully.")
+
+
+def _build_validation_coverage(tool_results: List[dict]) -> List[dict]:
+    """Build deterministic coverage rows with explicit PASS/FAIL/SKIPPED status."""
+    latest_by_tool: dict[str, dict] = {}
+    for r in tool_results:
+        tname = r.get("tool_name", "")
+        if tname:
+            latest_by_tool[tname] = r
+    coverage: List[dict] = []
+    for tool_name, label in _VALIDATION_COVERAGE_TOOLS:
+        if tool_name not in latest_by_tool:
+            coverage.append({
+                "validator_id": tool_name,
+                "label": label,
+                "status": "SKIPPED",
+                "reason": "Not executed by plan for this request.",
+            })
+            continue
+        status, reason = _infer_tool_status(latest_by_tool[tool_name])
+        coverage.append({
+            "validator_id": tool_name,
+            "label": label,
+            "status": status,
+            "reason": reason,
+        })
+    return coverage
 
 
 def _build_deterministic_audit_sections(factual_lines: List[str]) -> dict:
@@ -104,6 +173,17 @@ def _build_deterministic_audit_sections(factual_lines: List[str]) -> dict:
         "risk_assessment": risk_assessment,
         "recommendations": recommendations,
     }
+
+
+def _enforce_contradiction_guards(det: dict, factual_lines: List[str]) -> dict:
+    """Remove contradictions between deterministic sections and known factual lines."""
+    uuid_no_duplicates = any(line == "UUID: No duplicate UUIDs found." for line in factual_lines)
+    if uuid_no_duplicates:
+        det["validation_errors"] = [e for e in det.get("validation_errors", []) if "Duplicate UUIDs" not in e]
+        det["risk_assessment"] = [r for r in det.get("risk_assessment", []) if "Duplicate UUIDs" not in r]
+        det["recommendations"] = [r for r in det.get("recommendations", []) if "duplicate uuid" not in r.lower()]
+        det["uuid_consistency"] = "No duplicate UUIDs were found."
+    return det
 
 
 def get_shared_checkpointer():
@@ -292,8 +372,13 @@ def create_tool_execution_node(selected_file: Optional[str] = None, upload_folde
             if not tool:
                 tool_results.append({
                     "tool_name": tool_name,
+                    "validator_id": tool_name,
+                    "status": "FAIL",
+                    "error_code": "TOOL_NOT_FOUND",
                     "result": f"❌ Tool not found: {tool_name}",
-                    "error": True
+                    "error": True,
+                    "message": f"Tool not found: {tool_name}",
+                    "issues": [],
                 })
                 continue
             
@@ -331,16 +416,38 @@ def create_tool_execution_node(selected_file: Optional[str] = None, upload_folde
             # Execute tool
             try:
                 result = tool.invoke(args)
-                tool_results.append({
+                status, reason = _infer_tool_status({
                     "tool_name": tool_name,
                     "result": str(result) if result else "",
-                    "error": False
+                    "error": False,
+                })
+                tool_results.append({
+                    "tool_name": tool_name,
+                    "validator_id": tool_name,
+                    "result": str(result) if result else "",
+                    "error": False,
+                    "status": status,
+                    "error_code": None,
+                    "message": reason,
+                    "issues": [],
                 })
             except Exception as e:
                 tool_results.append({
                     "tool_name": tool_name,
+                    "validator_id": tool_name,
+                    "status": "FAIL",
+                    "error_code": "TOOL_EXECUTION_ERROR",
                     "result": f"❌ Error executing {tool_name}: {str(e)}",
-                    "error": True
+                    "error": True,
+                    "message": str(e),
+                    "issues": [{
+                        "validator_id": tool_name,
+                        "element_path": "",
+                        "severity": "HIGH",
+                        "error_code": "TOOL_EXECUTION_ERROR",
+                        "message": str(e),
+                        "remediation": "Inspect validator/tool logs and input file format.",
+                    }],
                 })
         
         return {
@@ -619,8 +726,10 @@ Execution Plan:
             )
 
         # Functional deterministic report: build critical sections from factual_lines so the report cannot contradict tools.
-        if (enterprise_format_requested or validation_report_requested) and factual_lines:
+        if enterprise_format_requested or validation_report_requested:
             det = _build_deterministic_audit_sections(factual_lines)
+            det = _enforce_contradiction_guards(det, factual_lines)
+            coverage_rows = _build_validation_coverage(tool_results)
             structural_parts: List[str] = []
             for r in tool_results:
                 tname = r.get("tool_name", "")
@@ -642,7 +751,20 @@ Execution Plan:
                 final_verdict = "The file is incomplete or not compliant. Issues: " + "; ".join(det["validation_errors"]) + ". Address the recommendations below."
             else:
                 final_verdict = "The file passed all validation checks covered by the tools. No critical issues found."
+            coverage_lines = [
+                f"- {row['label']}: {row['status']} ({row['reason']})"
+                for row in coverage_rows
+            ]
             report_sections = [
+                "## Metadata",
+                "",
+                f"- engine_version: {ENGINE_VERSION}",
+                f"- result_schema_version: {RESULT_SCHEMA_VERSION}",
+                "",
+                "## Validation Coverage",
+                "",
+                "\n".join(coverage_lines),
+                "",
                 "## Structural Summary",
                 "",
                 structural_summary,
@@ -993,6 +1115,8 @@ def run_agent_query_structured(
         "tool_results": [],
         "summary": "",
         "steps": [],
+        "engine_version": ENGINE_VERSION,
+        "result_schema_version": RESULT_SCHEMA_VERSION,
     }
     try:
         file_path = None
@@ -1056,6 +1180,8 @@ def run_agent_query_structured(
             "tool_results": tool_results,
             "summary": summary,
             "steps": steps,
+            "engine_version": ENGINE_VERSION,
+            "result_schema_version": RESULT_SCHEMA_VERSION,
         }
     except Exception as e:
         logger = logging.getLogger(__name__)

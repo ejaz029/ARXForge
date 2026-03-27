@@ -1,12 +1,15 @@
 [server]
 headless = false
+# Bind loopback only — avoids some Windows hostname/IPv6 resolution issues when opening the UI.
+address = "127.0.0.1"
 port = 8501
 
 [logger]
 level = "error"
 
 [client]
-showErrorDetails = false
+# Show tracebacks in the browser when the app fails to render (helps when the window looks "blank").
+showErrorDetails = true
 
 [runner]
 fastReruns = true

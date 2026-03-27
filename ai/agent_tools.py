@@ -6,6 +6,7 @@ import os
 import xml.etree.ElementTree as ET
 from typing import Optional
 from langchain_core.tools import tool
+from validators.xml_loader import parse_arxml_root
 
 # Import existing validation functions
 from ai.arxml_extractor import extract_arxml_data, _local_tag, _child_text
@@ -69,8 +70,7 @@ def _parse_arxml_file(file_path: str) -> Optional[ET.Element]:
     try:
         if not os.path.exists(file_path):
             return None
-        tree = ET.parse(file_path)
-        return tree.getroot()
+        return parse_arxml_root(file_path)
     except Exception:
         return None
 
@@ -253,7 +253,7 @@ def check_duplicate_uuids_tool(file_path: str) -> str:
         if root is None:
             return f"❌ Error: Could not parse {os.path.basename(file_path)}"
         
-        errors = validate_uuid_uniqueness(root)
+        errors, _ = validate_uuid_uniqueness(root)
         if not errors:
             return f"✅ No duplicate UUIDs found in {os.path.basename(file_path)}"
         
